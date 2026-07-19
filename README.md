@@ -2,6 +2,8 @@
 
 A premium desktop browser built for the Muslim community. Privacy-first. Open source. Free.
 
+Founded by Waleed Naeem · Built by Ataraxy Developers · Islamabad, Pakistan
+
 ## What's inside
 
 - **Prayer times** — calculated offline from your location, 8 calculation methods, both Hanafi and Shafi Asr support
@@ -43,7 +45,9 @@ Noorani Browser does not collect any data about you, your browsing, or your usag
 
 ## Contributing
 
-Issues and pull requests welcome. This is a solo-built project, response times may vary.
+Issues and pull requests welcome. Response times may vary — this is a small team.
+
+Developer contact: devs@nooranibrowser.com
 
 ## License
 
@@ -57,9 +61,16 @@ MIT — see [LICENSE](LICENSE) for details.
 - Content blocklists: [StevenBlack/hosts](https://github.com/StevenBlack/hosts) + custom curated lists
 - Typography: Amiri Quran, DM Serif Display, Inter
 
-## Contact
+## About
+
+Noorani Browser is a project of Ataraxy Developers, an Islamabad-based software team.
 
 - Website: [nooraniBrowser.com](https://nooraniBrowser.com)
-- Email: sheikh.waleed.naeem@gmail.com
+- Company: [ataraxydevelopers.com](https://ataraxydevelopers.com)
+- Feedback: feedback@nooranibrowser.com
+- Support: support@nooranibrowser.com
+- Press: pr@nooranibrowser.com
+
+Founded and led by Waleed Naeem.
 
 Built in Islamabad, Pakistan. Bismillah.

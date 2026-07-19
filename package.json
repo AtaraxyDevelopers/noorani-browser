@@ -17,8 +17,15 @@
   "keywords": [],
   "author": {
     "name": "Waleed Naeem",
-    "email": "sheikh.waleed.naeem@gmail.com"
+    "email": "devs@nooranibrowser.com",
+    "url": "https://ataraxydevelopers.com"
   },
+  "contributors": [
+    {
+      "name": "Ataraxy Developers",
+      "url": "https://ataraxydevelopers.com"
+    }
+  ],
   "homepage": "https://nooraniBrowser.com",
   "license": "MIT",
   "type": "commonjs",
@@ -29,7 +36,7 @@
   "build": {
     "appId": "com.noorani.browser",
     "productName": "Noorani Browser",
-    "copyright": "Copyright © 2026 Waleed Naeem",
+    "copyright": "Copyright © 2026 Waleed Naeem / Ataraxy Developers",
     "directories": {
       "output": "dist"
     },
@@ -45,7 +52,8 @@
         "nsis"
       ],
       "icon": "assets/icons/icon.ico",
-      "artifactName": "Noorani-Browser-Setup.${ext}"
+      "artifactName": "Noorani-Browser-Setup.${ext}",
+      "publisherName": "Waleed Naeem"
     },
     "nsis": {
       "oneClick": false,
