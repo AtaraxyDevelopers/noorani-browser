@@ -52,8 +52,7 @@
         "nsis"
       ],
       "icon": "assets/icons/icon.ico",
-      "artifactName": "Noorani-Browser-Setup.${ext}",
-      "publisherName": "Waleed Naeem"
+      "artifactName": "Noorani-Browser-Setup.${ext}"
     },
     "nsis": {
       "oneClick": false,
