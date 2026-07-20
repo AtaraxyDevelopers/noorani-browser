@@ -190,6 +190,37 @@
     .noorani-modal__field.has-error .noorani-modal__field-error {
       display: block;
     }
+
+    .noorani-modal__origin {
+      font-size: 12px;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      color: var(--nm-muted);
+      background: var(--nm-hover);
+      border-radius: 6px;
+      padding: 6px 10px;
+      margin: 0 0 16px 0;
+      word-break: break-all;
+    }
+    .noorani-modal__checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 18px 0;
+      font-size: 13px;
+      color: var(--nm-text);
+    }
+    .noorani-modal__checkbox-row input {
+      width: 15px; height: 15px;
+      accent-color: var(--nm-accent);
+      cursor: pointer;
+    }
+    .noorani-modal__checkbox-row label { cursor: pointer; }
+    .noorani-modal__btn--allow {
+      background: var(--nm-accent);
+      color: #ffffff;
+      border-color: var(--nm-accent);
+    }
+    .noorani-modal__btn--allow:hover { filter: brightness(0.95); }
   `;
 
   function injectStyle() {
@@ -596,9 +627,137 @@
     });
   }
 
+  // Permission dialog — Allow/Deny with a "remember for this site" checkbox.
+  // Resolves to { action: 'allow' | 'deny', remember: boolean }. Dismissing
+  // (Escape / backdrop click) counts as Deny with remember left at its
+  // default, matching the safe-default posture everywhere else in this file.
+  //
+  //   const result = await nooraniModal.permission({
+  //     title:  'web.whatsapp.com wants to use your camera and microphone',
+  //     origin: 'https://web.whatsapp.com',
+  //     rememberDefault: true
+  //   });
+  function permissionDialog(opts) {
+    opts = opts || {};
+    const title  = opts.title  || 'Permission request';
+    const origin = opts.origin || '';
+    const rememberLabel = opts.rememberLabel || 'Remember for this site';
+    const allowText = opts.allowText || 'Allow';
+    const denyText  = opts.denyText  || 'Deny';
+    const rememberDefault = opts.rememberDefault !== false;
+
+    injectStyle();
+
+    return new Promise((resolve) => {
+      const backdrop = document.createElement('div');
+      backdrop.className = 'noorani-modal__backdrop';
+      backdrop.setAttribute('role', 'dialog');
+      backdrop.setAttribute('aria-modal', 'true');
+
+      const card = document.createElement('div');
+      card.className = 'noorani-modal__card';
+
+      const h = document.createElement('h2');
+      h.className = 'noorani-modal__title';
+      h.textContent = title;
+      card.appendChild(h);
+
+      if (origin) {
+        const o = document.createElement('div');
+        o.className = 'noorani-modal__origin';
+        o.textContent = origin;
+        card.appendChild(o);
+      }
+
+      const checkRow = document.createElement('div');
+      checkRow.className = 'noorani-modal__checkbox-row';
+      const checkId = 'nm-remember-' + Math.random().toString(36).slice(2, 8);
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.id = checkId;
+      checkbox.checked = rememberDefault;
+      const checkLabel = document.createElement('label');
+      checkLabel.htmlFor = checkId;
+      checkLabel.textContent = rememberLabel;
+      checkRow.append(checkbox, checkLabel);
+      card.appendChild(checkRow);
+
+      const actions = document.createElement('div');
+      actions.className = 'noorani-modal__actions';
+
+      const denyBtn = document.createElement('button');
+      denyBtn.type = 'button';
+      denyBtn.className = 'noorani-modal__btn noorani-modal__btn--cancel';
+      denyBtn.textContent = denyText;
+
+      const allowBtn = document.createElement('button');
+      allowBtn.type = 'button';
+      allowBtn.className = 'noorani-modal__btn noorani-modal__btn--allow';
+      allowBtn.textContent = allowText;
+
+      actions.append(denyBtn, allowBtn);
+      card.appendChild(actions);
+      backdrop.appendChild(card);
+
+      const prevFocus = document.activeElement;
+      let resolved = false;
+
+      function cleanup() {
+        document.removeEventListener('keydown', onKey, true);
+        backdrop.classList.remove('is-open');
+        setTimeout(() => {
+          if (backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
+          if (prevFocus && typeof prevFocus.focus === 'function') {
+            try { prevFocus.focus(); } catch (_) {}
+          }
+        }, 150);
+      }
+      function finish(action) {
+        if (resolved) return;
+        resolved = true;
+        cleanup();
+        resolve({ action, remember: checkbox.checked });
+      }
+
+      denyBtn.addEventListener('click',  () => finish('deny'));
+      allowBtn.addEventListener('click', () => finish('allow'));
+
+      backdrop.addEventListener('mousedown', (e) => {
+        if (e.target === backdrop) finish('deny');
+      });
+
+      function onKey(e) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+          finish('deny');
+        } else if (e.key === 'Enter') {
+          if (document.activeElement !== denyBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            finish('allow');
+          }
+        } else if (e.key === 'Tab') {
+          e.preventDefault();
+          const order = [checkbox, denyBtn, allowBtn];
+          const idx = order.indexOf(document.activeElement);
+          order[(idx + 1) % order.length].focus();
+        }
+      }
+      document.addEventListener('keydown', onKey, true);
+
+      document.body.appendChild(backdrop);
+      backdrop.offsetHeight;
+      backdrop.classList.add('is-open');
+
+      setTimeout(() => denyBtn.focus(), 0);
+    });
+  }
+
   window.nooraniModal = {
-    confirm: confirmDialog,
-    prompt:  promptDialog,
-    form:    formDialog
+    confirm:    confirmDialog,
+    prompt:     promptDialog,
+    form:       formDialog,
+    permission: permissionDialog
   };
 })();

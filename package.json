@@ -1,7 +1,7 @@
 {
   "name": "noorani-browser",
   "productName": "Noorani Browser",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A premium browser built for the Muslim community.",
   "main": "main.js",
   "scripts": {

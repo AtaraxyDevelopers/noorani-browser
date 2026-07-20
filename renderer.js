@@ -40,9 +40,22 @@ const INTERNAL_SETTINGS = 'noorani://settings';
 const INTERNAL_WELCOME  = 'noorani://welcome';
 const INTERNAL_QURAN    = 'noorani://quran';
 const INTERNAL_DUAS     = 'noorani://duas';
+const INTERNAL_PRIVATE  = 'noorani://private';
 
 // webview preload — same preload.js, activated only on trusted schemes.
 const PRELOAD_URL = new URL('preload.js', window.location.href).href;
+
+// ------- Window identity (Phase v1.0.1 Parts C + E) --------
+// A window is either the original main window, a detached-tab window
+// (?openUrl=...), or an incognito window (?incognito=1&partition=...).
+// All three load the exact same index.html/renderer.js — this is the only
+// place that tells them apart.
+const _bootParams   = new URLSearchParams(window.location.search);
+const BOOT_OPEN_URL = _bootParams.get('openUrl') || null;
+const IS_INCOGNITO  = _bootParams.get('incognito') === '1';
+const INCOGNITO_PARTITION = _bootParams.get('partition') || null;
+
+if (IS_INCOGNITO) document.documentElement.setAttribute('data-incognito', '1');
 
 const FALLBACK_FAVICON =
   'data:image/svg+xml;utf8,' + encodeURIComponent(
@@ -129,6 +142,10 @@ function getSearchPrefix() {
 }
 
 function getHomepage() {
+  // Private windows always land on the private-browsing landing page,
+  // even if the user has a custom homepage configured for normal windows —
+  // same convention real browsers use for "New private tab".
+  if (IS_INCOGNITO) return INTERNAL_PRIVATE;
   if (currentSettings.useCustomHomepage &&
       currentSettings.homepage &&
       currentSettings.homepage !== INTERNAL_HOMEPAGE) {
@@ -216,6 +233,16 @@ function createTab(url) {
   const id = newId();
 
   const webview = document.createElement('webview');
+  // Partition MUST be set before src for it to take effect — an incognito
+  // window's webviews all share INCOGNITO_PARTITION (so tabs within one
+  // private window share cookies/session with each other), which is a
+  // non-"persist:" partition name, so Electron keeps it in memory only and
+  // discards it once nothing references it anymore (i.e. when the window
+  // closes). Normal windows omit the attribute entirely, which leaves the
+  // webview on session.defaultSession — unchanged from v1.0.0 behaviour.
+  if (IS_INCOGNITO && INCOGNITO_PARTITION) {
+    webview.setAttribute('partition', INCOGNITO_PARTITION);
+  }
   webview.setAttribute('src', openUrl);
   webview.setAttribute('allowpopups', '');
   webview.setAttribute('preload', PRELOAD_URL);
@@ -225,6 +252,7 @@ function createTab(url) {
   tabEl.className = 'tab';
   tabEl.dataset.tabId = id;
   tabEl.setAttribute('role', 'tab');
+  tabEl.draggable = true;
 
   const favEl = document.createElement('img');
   favEl.className = 'tab__favicon';
@@ -285,6 +313,24 @@ function wireTab(tab) {
     closeTab(tab.id);
   });
 
+  // --- Drag to reorder / detach (Phase v1.0.1 Part C) ---
+  tab.tabEl.addEventListener('dragstart', (e) => {
+    dragTabId = tab.id;
+    tab.tabEl.classList.add('is-dragging');
+    try {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', tab.id);
+    } catch (_) {}
+  });
+  tab.tabEl.addEventListener('dragend', (e) => {
+    tab.tabEl.classList.remove('is-dragging');
+    hideDragIndicator();
+    const wasDragging = dragTabId === tab.id;
+    dragTabId = null;
+    if (!wasDragging) return;
+    if (isDragOutsideTabBar()) detachTab(tab, e.screenX, e.screenY);
+  });
+
   const wv = tab.webview;
 
   wv.addEventListener('did-navigate', (e) => {
@@ -292,6 +338,7 @@ function wireTab(tab) {
     tab._loggedUrl = null;
     tab.title = null;
     tab.titleEl.textContent = hostLabel(e.url) || 'Loading…';
+    applySavedZoom(tab, e.url);
     if (tab.id === currentTabId) {
       urlInput.value = urlBarValueFor(e.url);
       updateNavButtons();
@@ -352,7 +399,19 @@ function wireTab(tab) {
 
   wv.addEventListener('new-window', (e) => {
     try { e.preventDefault(); } catch (_) {}
-    if (e.url) createTab(e.url);
+    if (!e.url) return;
+    // "Always open external links in a private window" (Part E setting) —
+    // a link that would otherwise open in a new tab opens in a fresh
+    // private window instead. Already-private windows just stay private
+    // via the normal new-tab path (IS_INCOGNITO already governs createTab's
+    // partition), no extra routing needed.
+    const wantsPrivate = !IS_INCOGNITO && !!(currentSettings.privateBrowsing &&
+                          currentSettings.privateBrowsing.alwaysExternalLinks);
+    if (wantsPrivate && api && api.window) {
+      api.window.openPrivateUrl(e.url);
+    } else {
+      createTab(e.url);
+    }
   });
 
   // Right-click inside the guest page. In this Electron build, params.x/y
@@ -375,6 +434,7 @@ function wireTab(tab) {
 }
 
 function maybeLogHistory(tab) {
+  if (IS_INCOGNITO) return;   // private windows never write to history.json
   if (!tab.url) return;
   if (tab._loggedUrl === tab.url) return;
   tab._loggedUrl = tab.url;
@@ -443,6 +503,149 @@ function closeTab(id) {
   }
 }
 
+// ============ Drag to reorder / detach (Phase v1.0.1 Part C) ============
+//
+// Stage 1 (reorder): a single delegated dragover/drop pair on tabsEl tracks
+// where the dragged tab would land and shows a thin insertion indicator;
+// drop commits the reorder into the `tabs` array (order also drives
+// Ctrl+1..9 / cycleTab) and FLIP-animates the tab chrome into place.
+//
+// Stage 2 (detach): dragend decides whether the release point counted as
+// "outside the tab strip" using the same lastDrag* tracking Stage 1 already
+// maintains. If so, main.js is asked to either drop the tab into whatever
+// other Noorani window is under the cursor, or open a fresh window for it.
+
+const TAB_DETACH_Y_THRESHOLD = 46; // px below the tab bar before a drag counts as "wants out"
+let dragTabId = null;
+let dragIndicatorEl = null;
+let lastDragClientX = 0;
+let lastDragClientY = 0;
+let lastDragOverTabBar = false;
+
+function ensureDragIndicator() {
+  if (dragIndicatorEl) return dragIndicatorEl;
+  dragIndicatorEl = document.createElement('div');
+  dragIndicatorEl.className = 'tab-drop-indicator';
+  tabsEl.appendChild(dragIndicatorEl);
+  return dragIndicatorEl;
+}
+
+function hideDragIndicator() {
+  if (dragIndicatorEl) dragIndicatorEl.classList.remove('is-visible');
+}
+
+// Positions the insertion line for clientX and returns the id of the tab
+// it would land before (null = end of the strip).
+function positionDragIndicator(clientX) {
+  const indicator = ensureDragIndicator();
+  const others = Array.from(tabsEl.querySelectorAll('.tab'))
+    .filter((el) => el.dataset.tabId !== dragTabId);
+
+  let beforeEl = null;
+  for (const el of others) {
+    const r = el.getBoundingClientRect();
+    if (clientX < r.left + r.width / 2) { beforeEl = el; break; }
+  }
+
+  const containerRect = tabsEl.getBoundingClientRect();
+  const left = beforeEl
+    ? beforeEl.getBoundingClientRect().left - containerRect.left + tabsEl.scrollLeft
+    : (others.length
+        ? others[others.length - 1].getBoundingClientRect().right - containerRect.left + tabsEl.scrollLeft
+        : 0);
+
+  indicator.style.left = left + 'px';
+  indicator.classList.add('is-visible');
+  return beforeEl ? beforeEl.dataset.tabId : null;
+}
+
+function isDragOutsideTabBar() {
+  if (lastDragOverTabBar) return false;
+  const tabBarEl = document.querySelector('.tab-bar');
+  if (!tabBarEl) return false;
+  const r = tabBarEl.getBoundingClientRect();
+  return lastDragClientY > r.bottom + TAB_DETACH_Y_THRESHOLD ||
+         lastDragClientY < -20 || lastDragClientX < -20 ||
+         lastDragClientX > window.innerWidth + 20;
+}
+
+// Reorders the `tabs` array, then FLIP-animates the tab chrome (capture old
+// positions, move the DOM, transform back from old->new, then transition
+// to identity) so the row settles into place over ~200ms instead of
+// snapping.
+function reorderTabs(sourceId, beforeId) {
+  const fromIdx = tabs.findIndex((t) => t.id === sourceId);
+  if (fromIdx === -1) return;
+  const [moved] = tabs.splice(fromIdx, 1);
+  if (beforeId) {
+    const toIdx = tabs.findIndex((t) => t.id === beforeId);
+    tabs.splice(toIdx === -1 ? tabs.length : toIdx, 0, moved);
+  } else {
+    tabs.push(moved);
+  }
+
+  const oldRects = new Map();
+  for (const t of tabs) oldRects.set(t.id, t.tabEl.getBoundingClientRect());
+
+  for (const t of tabs) tabsEl.insertBefore(t.tabEl, newTabBtn);
+
+  for (const t of tabs) {
+    const oldRect = oldRects.get(t.id);
+    const newRect = t.tabEl.getBoundingClientRect();
+    const dx = oldRect.left - newRect.left;
+    if (!dx) continue;
+    t.tabEl.style.transition = 'none';
+    t.tabEl.style.transform = `translateX(${dx}px)`;
+    // eslint-disable-next-line no-unused-expressions
+    t.tabEl.offsetHeight;
+    requestAnimationFrame(() => {
+      t.tabEl.style.transition = 'transform 200ms ease';
+      t.tabEl.style.transform = '';
+    });
+  }
+}
+
+async function detachTab(tab, screenX, screenY) {
+  if (!api || !api.window || !api.window.detachTab) return;
+  let result;
+  try {
+    result = await api.window.detachTab({ url: tab.url, screenX, screenY });
+  } catch (_) {
+    return;
+  }
+  if (!result || result.error) return;
+  // Reuses the exact same cleanup closeTab() already does for the
+  // "last tab in the window" case — tabs.length hitting 0 there calls
+  // window.close(), which is exactly the spec'd "close source window
+  // instead of leaving it empty" behaviour, for free.
+  closeTab(tab.id);
+}
+
+// Capture-phase so this sees dragover regardless of which element is
+// under the cursor (a .tab, .tab__title, the new-tab button, the toolbar
+// below the strip, …) — needed both to position the indicator and to know,
+// at dragend time, whether the release point counted as "outside".
+window.addEventListener('dragover', (e) => {
+  if (!dragTabId) return;
+  lastDragClientX = e.clientX;
+  lastDragClientY = e.clientY;
+  lastDragOverTabBar = !!(e.target && e.target.closest && e.target.closest('.tab-bar'));
+  if (lastDragOverTabBar) {
+    e.preventDefault();
+    positionDragIndicator(e.clientX);
+  } else {
+    hideDragIndicator();
+  }
+}, true);
+
+tabsEl.addEventListener('drop', (e) => {
+  if (!dragTabId) return;
+  e.preventDefault();
+  const beforeId = positionDragIndicator(e.clientX);
+  reorderTabs(dragTabId, beforeId);
+  hideDragIndicator();
+});
+
 // ============ Toolbar / title ============
 
 function updateNavButtons() {
@@ -457,15 +660,17 @@ function updateNavButtons() {
 }
 
 function syncWindowTitle() {
+  // Electron re-syncs the OS title bar from document.title on every
+  // navigation, which would silently erase the "(Private)" suffix the
+  // window was created with — so every branch here has to carry it.
+  const suffix = IS_INCOGNITO ? 'Noorani Browser (Private)' : 'Noorani Browser';
   const tab = activeTab();
-  if (!tab) { document.title = 'Noorani Browser'; return; }
+  if (!tab) { document.title = suffix; return; }
   if (tab.url && tab.url.startsWith('noorani:')) {
-    document.title = 'Noorani Browser';
+    document.title = suffix;
     return;
   }
-  document.title = tab.title
-    ? `${tab.title} - Noorani Browser`
-    : 'Noorani Browser';
+  document.title = tab.title ? `${tab.title} - ${suffix}` : suffix;
 }
 
 async function syncStar() {
@@ -548,8 +753,34 @@ if (window.nooraniAPI && typeof window.nooraniAPI.onShortcut === 'function') {
       case 'home':                 goHome(); break;
       case 'open-settings':        openSettings(); break;
       case 'toggle-bookmark-bar':  toggleBookmarkBarMode(); break;
+      case 'zoom-in':              applyZoomDelta(+ZOOM_STEP); break;
+      case 'zoom-out':             applyZoomDelta(-ZOOM_STEP); break;
+      case 'zoom-reset':           resetZoom(); break;
+      case 'open-tab-url':         createTab(args[0]); break;
+      case 'confirm-close-private': handleConfirmClosePrivate(); break;
     }
   });
+}
+
+// ============ Private window close confirmation (Phase v1.0.1 Part E) ====
+// Main intercepts the OS close for incognito windows and asks us first
+// (only when "Ask before closing a private window with multiple tabs" is
+// on and there's more than one tab) — see createSecondaryWindow() in
+// main.js. We resolve by telling main to force-close for real.
+async function handleConfirmClosePrivate() {
+  if (!api || !api.window || !api.window.forceClose) return;
+  if (tabs.length <= 1) {
+    await api.window.forceClose();
+    return;
+  }
+  const ok = await window.nooraniModal.confirm({
+    title:       'Close private window?',
+    message:     `This will close ${tabs.length} tabs in this private window. ` +
+                 `Anything you were doing here will be forgotten.`,
+    confirmText: 'Close Window',
+    variant:     'danger'
+  });
+  if (ok) await api.window.forceClose();
 }
 
 // ============ Bookmark toggle (star) ============
@@ -1067,6 +1298,8 @@ function buildWebviewContextMenu(tab, params) {
     const href = params.linkURL;
     items.push({ label: 'Open Link',            action: () => wv.loadURL(href) });
     items.push({ label: 'Open Link in New Tab', action: () => createTab(href) });
+    items.push({ label: 'Open Link in Private Window',
+      action: () => { if (api && api.window) api.window.openPrivateUrl(href); } });
     items.push({ divider: true });
     items.push({ label: 'Copy Link Address',
       action: () => navigator.clipboard.writeText(href).catch(() => {}) });
@@ -1355,6 +1588,128 @@ if (api && api.settings && api.settings.onChange) {
   });
 }
 
+// ============ Permission requests (Phase v1.0.1 Part B) ============
+// Main asks us (the chrome renderer, never the guest webview) to show a
+// nooraniModal prompt whenever a site requests camera/mic/location/etc and
+// the origin has no remembered decision yet. We're just the UI here — all
+// the "did they already answer this" logic lives in main.js.
+
+const PERMISSION_COPY = {
+  camera:           'use your camera',
+  microphone:       'use your microphone',
+  geolocation:      'know your location',
+  notifications:    'show notifications',
+  midi:             'access MIDI devices',
+  pointerLock:      'lock your pointer',
+  fullscreen:       'use fullscreen',
+  openExternal:     'open external applications',
+  'clipboard-read': 'read your clipboard'
+};
+
+function describePermissionTypes(types) {
+  const labels = (types || []).map((t) => PERMISSION_COPY[t] || t);
+  if (labels.length <= 1) return labels[0] || 'access this feature';
+  if (labels.length === 2) return `${labels[0]} and ${labels[1]}`;
+  return labels.slice(0, -1).join(', ') + ', and ' + labels[labels.length - 1];
+}
+
+if (api && api.permissions && api.permissions.onRequest) {
+  api.permissions.onRequest(async (req) => {
+    if (!req || !req.requestId || !window.nooraniModal) return;
+    const siteName = req.siteName || req.origin || 'This site';
+    let result;
+    try {
+      result = await window.nooraniModal.permission({
+        title:  `${siteName} wants to ${describePermissionTypes(req.types)}`,
+        origin: req.origin || '',
+        rememberDefault: true
+      });
+    } catch (_) {
+      result = { action: 'deny', remember: false };
+    }
+    api.permissions.respond({
+      requestId: req.requestId,
+      action:    result.action,
+      remember:  result.remember
+    });
+  });
+}
+
+// ============ Zoom (Phase v1.0.1 Part D) ============
+
+const ZOOM_MIN = -3, ZOOM_MAX = 3, ZOOM_STEP = 0.5;
+let zoomToastTimer = null;
+let zoomToastEl = null;
+
+// Electron's setZoomLevel uses the same base-1.2 curve Chromium's UI zoom
+// does, so this reproduces the percentage the user actually sees rather
+// than a hand-picked table.
+function zoomPercentFor(level) {
+  return Math.round(Math.pow(1.2, level) * 100);
+}
+
+function showZoomToast(percent) {
+  if (!zoomToastEl) {
+    zoomToastEl = document.createElement('div');
+    zoomToastEl.className = 'zoom-toast';
+    zoomToastEl.id = 'zoom-toast';
+    contentEl.appendChild(zoomToastEl);
+  }
+  zoomToastEl.textContent = percent + '%';
+  zoomToastEl.classList.remove('is-fading');
+  // Force reflow so re-triggering the transition works if the toast was
+  // already fading out.
+  // eslint-disable-next-line no-unused-expressions
+  zoomToastEl.offsetHeight;
+  zoomToastEl.classList.add('is-visible');
+  if (zoomToastTimer) clearTimeout(zoomToastTimer);
+  zoomToastTimer = setTimeout(() => {
+    zoomToastEl.classList.remove('is-visible');
+    zoomToastEl.classList.add('is-fading');
+  }, 1500);
+}
+
+function persistZoomForTab(tab, level) {
+  if (!tab || !tab.url || tab.url.startsWith('noorani:')) return;
+  const domain = hostLabel(tab.url);
+  if (!domain || !api || !api.zoom) return;
+  api.zoom.set(domain, level).catch(() => {});
+}
+
+function applyZoomDelta(delta) {
+  const tab = activeTab();
+  if (!tab) return;
+  let level = 0;
+  try { level = tab.webview.getZoomLevel() || 0; } catch (_) {}
+  level = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, level + delta));
+  try { tab.webview.setZoomLevel(level); } catch (_) { return; }
+  showZoomToast(zoomPercentFor(level));
+  persistZoomForTab(tab, level);
+}
+
+function resetZoom() {
+  const tab = activeTab();
+  if (!tab) return;
+  try { tab.webview.setZoomLevel(0); } catch (_) { return; }
+  showZoomToast(100);
+  persistZoomForTab(tab, 0);
+}
+
+// Applied silently (no toast) on navigation — restores whatever zoom the
+// user last set for this domain. Runs on every did-navigate, same as real
+// browsers: navigating within a domain keeps re-applying its saved level.
+function applySavedZoom(tab, url) {
+  if (!url || url.startsWith('noorani:') || !api || !api.zoom) return;
+  const domain = hostLabel(url);
+  if (!domain) return;
+  api.zoom.get(domain).then((level) => {
+    if (typeof level !== 'number' || !tab.webview) return;
+    try {
+      if (tab.webview.getZoomLevel() !== level) tab.webview.setZoomLevel(level);
+    } catch (_) {}
+  }).catch(() => {});
+}
+
 // ============ Prayer pill (Phase 9 Batch 1) ============
 
 const prayerPillEl  = document.getElementById('prayer-pill');
@@ -1575,9 +1930,20 @@ async function boot() {
   startPrayerTicker();
   renderWorshipToolbar();
 
+  // A detached tab (Part C) or a private window opened from a specific
+  // link (Part E's "Open Link in Private Window") arrives with its first
+  // tab's URL already decided — skip onboarding/homepage entirely.
+  if (BOOT_OPEN_URL) {
+    createTab(BOOT_OPEN_URL);
+    focusURLBar();
+    return;
+  }
+
   // First-run: open welcome instead of the homepage. Subsequent launches
-  // take the normal path via getHomepage().
-  const needsOnboarding = !!(currentSettings.onboarding &&
+  // take the normal path via getHomepage(). Incognito windows never see
+  // onboarding — getHomepage() already routes them to the private landing
+  // page instead.
+  const needsOnboarding = !IS_INCOGNITO && !!(currentSettings.onboarding &&
                              !currentSettings.onboarding.complete);
   createTab(needsOnboarding ? INTERNAL_WELCOME : undefined);
   focusURLBar();

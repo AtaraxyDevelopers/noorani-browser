@@ -85,6 +85,24 @@
       --accent:       var(--accent-gold);
     }
 
+    /* Incognito visual differentiation (Phase v1.0.1 Part E) — a private
+       window reads as "different" regardless of the app's light/dark theme
+       setting, so this comes after both theme blocks and wins on source
+       order (same specificity — an attribute selector on <html> either way). */
+    html[data-incognito="1"] {
+      --bg-toolbar:      #1c1c1c;
+      --tab-bar-bg:      #1c1c1c;
+      --bg-tab-inactive: #232323;
+      --bg-tab-active:   #2a2a2a;
+      --input-bg:        #141414;
+      --border:          #3a3a3a;
+      --text-primary:    #f0ede6;
+      --text-secondary:  #b3ada0;
+      --hover:           rgba(255,255,255,0.06);
+      --active:          rgba(255,255,255,0.1);
+      --tab-hover:       #2d2d2d;
+    }
+
     * { box-sizing: border-box; }
 
     html, body {
@@ -111,12 +129,28 @@
     }
     .tabs {
       flex: 1 1 auto;
+      position: relative;
       display: flex; align-items: flex-end;
       overflow-x: auto; overflow-y: hidden;
       scrollbar-width: none; -ms-overflow-style: none;
       gap: 2px;
     }
     .tabs::-webkit-scrollbar { display: none; }
+
+    /* Drag to reorder / detach (Phase v1.0.1 Part C) */
+    .tab.is-dragging { opacity: 0.35; }
+    .tab-drop-indicator {
+      position: absolute;
+      top: 4px; bottom: 4px;
+      width: 2px;
+      background: var(--accent);
+      border-radius: 2px;
+      opacity: 0;
+      pointer-events: none;
+      z-index: 5;
+      transition: left 100ms ease, opacity 100ms ease;
+    }
+    .tab-drop-indicator.is-visible { opacity: 1; }
 
     .tab {
       flex: 0 0 200px;
@@ -238,6 +272,28 @@
 
     .url-wrap {
       flex: 1 1 auto; display: flex; align-items: center; margin: 0 4px;
+    }
+    /* Private pill (Phase v1.0.1 Part E) — only rendered in incognito
+       windows; CSS-only toggle, no JS needed. */
+    .private-pill {
+      display: none;
+      align-items: center; gap: 5px; flex: 0 0 auto;
+      height: 28px; padding: 0 10px; margin-right: 6px;
+      background: rgba(212, 175, 55, 0.14);
+      color: var(--accent-gold);
+      border-radius: 999px;
+      font-family: var(--font-sans);
+      font-size: 11px; font-weight: 600;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
+    html[data-incognito="1"] .private-pill { display: inline-flex; }
+    /* Subtle address-bar tell beyond the pill — a faint gold-tinted border,
+       barely noticeable at rest but a clear cue once the field is focused. */
+    html[data-incognito="1"] #url { border-color: rgba(212, 175, 55, 0.3); }
+    html[data-incognito="1"] #url:focus {
+      border-color: var(--accent-gold);
+      box-shadow: 0 0 0 3px rgba(212, 175, 55, 0.18);
     }
     #url {
       flex: 1 1 auto; height: 36px; padding: 0 14px;
@@ -375,6 +431,34 @@
       width: 100% !important;
       opacity: 0;
       transition: width 180ms ease-out, opacity 260ms ease 160ms;
+    }
+
+    /* ============ ZOOM TOAST (Phase v1.0.1 Part D) ============ */
+    .zoom-toast {
+      position: absolute;
+      top: 14px; right: 14px;
+      padding: 6px 14px;
+      background: var(--tab-active);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font-family: var(--font-sans);
+      font-size: var(--text-xs);
+      font-weight: 600;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.18);
+      z-index: 15;
+      opacity: 0;
+      transform: translateY(-4px);
+      pointer-events: none;
+      transition: opacity 180ms ease, transform 180ms ease;
+    }
+    .zoom-toast.is-visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .zoom-toast.is-fading {
+      opacity: 0;
+      transition: opacity 400ms ease;
     }
 
     /* ============ PANEL ============ */
@@ -709,6 +793,15 @@
     </button>
 
     <div class="url-wrap">
+      <span class="private-pill" id="private-pill" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a18.5 18.5 0 0 1 5.06-5.94"></path>
+          <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"></path>
+          <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"></path>
+          <line x1="1" y1="1" x2="23" y2="23"></line>
+        </svg>
+        Private
+      </span>
       <input id="url" type="text" spellcheck="false" autocomplete="off"
              placeholder="Search or enter a URL" />
     </div>

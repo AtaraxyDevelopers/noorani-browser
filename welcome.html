@@ -293,21 +293,57 @@
 
     /* ---------- Step actions ---------- */
     .step__actions {
-      display: flex; justify-content: space-between;
+      display: flex; justify-content: flex-end;
       gap: 12px;
       margin-top: 24px;
     }
-    .step__actions .spacer { flex: 1 1 auto; }
+
+    /* ---------- Top-left back arrow (Phase v1.0.1 Part F) ----------
+       Styled to match the toolbar back/forward icon buttons elsewhere in
+       the app (index.html #back/#forward): same stroke-based chevron,
+       36px hit target, subtle hover tint + scale, darker on mousedown. */
+    .top-back {
+      position: absolute;
+      top: 24px; left: 24px;
+      width: 36px; height: 36px;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: transparent; border: none; border-radius: 8px;
+      color: var(--text); cursor: pointer;
+      transition: background-color 120ms ease, transform 120ms ease, color 120ms ease;
+    }
+    .top-back svg { width: 20px; height: 20px; }
+    .top-back:hover:not(:disabled) {
+      background: var(--hover);
+      transform: scale(1.06);
+    }
+    .top-back:active:not(:disabled) {
+      background: var(--switch-off);
+      transform: scale(1);
+    }
+    .top-back:disabled {
+      color: var(--muted);
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
   </style>
 </head>
 <body>
-  <div class="welcome">
-    <!-- Progress (hidden on Step 1, shown on 2 + 3) -->
-    <div class="progress" id="progress" hidden>
+  <div class="welcome" style="position: relative;">
+    <button class="top-back" id="top-back" type="button" aria-label="Back" title="Back" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="19" y1="12" x2="5" y2="12"></line>
+        <polyline points="12 19 5 12 12 5"></polyline>
+      </svg>
+    </button>
+
+    <!-- Progress: visible on every step, including Step 1 (Part G fix —
+         it used to be hidden on Step 1, which meant the first counter a
+         user ever saw was "Step 2 of 3" with no visible Step 1 before it). -->
+    <div class="progress" id="progress">
       <span class="progress__dot" data-dot="1"></span>
       <span class="progress__dot" data-dot="2"></span>
       <span class="progress__dot" data-dot="3"></span>
-      <span class="progress__label" id="progress-label">Step 2 of 3</span>
+      <span class="progress__label" id="progress-label">Step 1 of 3</span>
     </div>
 
     <!-- STEP 1: Intro -->
@@ -426,8 +462,6 @@
       </div>
 
       <div class="step__actions">
-        <button class="btn" id="back-2">Back</button>
-        <span class="spacer"></span>
         <button class="btn btn--primary" id="next-2">Continue</button>
       </div>
     </section>
@@ -454,13 +488,12 @@
       <p class="step__hint">You can change this anytime in settings.</p>
 
       <div class="step__actions">
-        <button class="btn" id="back-3">Back</button>
-        <span class="spacer"></span>
         <button class="btn btn--primary" id="finish-btn">Enter Noorani</button>
       </div>
     </section>
   </div>
 
+  <script src="/modal.js"></script>
   <script>
     (function () {
       const api  = window.nooraniAPI;
@@ -488,6 +521,7 @@
       const progress = document.getElementById('progress');
       const progressLabel = document.getElementById('progress-label');
       const dots = progress.querySelectorAll('.progress__dot');
+      const topBackBtn = document.getElementById('top-back');
       let current = 0;
 
       function showStep(idx) {
@@ -512,18 +546,21 @@
         window.scrollTo({ top: 0, behavior: 'instant' });
       }
 
+      // Part G fix: progress is now shown on every step (including Step 1)
+      // instead of being hidden until Step 2 — the counter used to jump
+      // straight to "Step 2 of 3" with no Step 1 ever having been shown.
       function updateProgress() {
-        if (current === 0) {
-          progress.hidden = true;
-          return;
-        }
-        progress.hidden = false;
         progressLabel.textContent = `Step ${current + 1} of 3`;
         dots.forEach((d, i) => {
           d.classList.toggle('is-current', i === current);
           d.classList.toggle('is-done',   i <  current);
         });
+        topBackBtn.disabled = (current === 0);
       }
+
+      topBackBtn.addEventListener('click', () => {
+        if (current > 0) showStep(current - 1);
+      });
 
       // ---------- Prefill from existing settings ----------
       (function prefill() {
@@ -543,12 +580,41 @@
         if (loc.country) document.getElementById('country-input').value = loc.country;
       })();
 
-      // Auto-flip RTL when Arabic / Urdu selected — user can still override.
       const langSel    = document.getElementById('language-select');
       const rtlToggle  = document.getElementById('rtl-toggle');
-      langSel.addEventListener('change', () => {
-        const auto = (langSel.value === 'ar' || langSel.value === 'ur');
-        rtlToggle.checked = auto;
+
+      // Phase v1.0.1 Part H — only English is actually implemented. Picking
+      // anything else pops a "coming in v1.1" email-capture modal instead of
+      // silently pretending the language works; either button on that modal
+      // ends with the select back on English (there's no functional path
+      // today for interface.language to be anything else).
+      const LANGUAGE_NAMES = {
+        ur: 'Urdu', ar: 'Arabic', id: 'Bahasa Indonesia', tr: 'Turkish', ms: 'Malay'
+      };
+      langSel.addEventListener('change', async () => {
+        const value = langSel.value;
+        if (value === 'en') { rtlToggle.checked = false; return; }
+
+        const langName = LANGUAGE_NAMES[value] || value;
+        let result = null;
+        if (window.nooraniModal) {
+          result = await window.nooraniModal.form({
+            title:   `${langName} language support coming in v1.1`,
+            message: 'Full internationalization with proper right-to-left layout is planned for our next release. Enter your email to be notified when your language is ready.',
+            fields: [
+              { key: 'email', label: 'Email', value: '', type: 'email', placeholder: 'you@example.com',
+                validate: (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) ? null : 'Enter a valid email' }
+            ],
+            confirmText: 'Notify me',
+            cancelText:  'Continue in English'
+          });
+        }
+        if (result && result.email && api && api.language) {
+          try { await api.language.reportInterest(result.email, langName); }
+          catch (err) { console.error('[noorani] language interest failed:', err); }
+        }
+        langSel.value = 'en';
+        rtlToggle.checked = false;
       });
 
       // ---------- Collection ----------
@@ -590,14 +656,13 @@
         () => showStep(1));
       document.getElementById('skip-btn').addEventListener('click',
         () => finish({ skip: true }));
-      document.getElementById('back-2').addEventListener('click',
-        () => showStep(0));
       document.getElementById('next-2').addEventListener('click',
         () => showStep(2));
-      document.getElementById('back-3').addEventListener('click',
-        () => showStep(1));
       document.getElementById('finish-btn').addEventListener('click',
         () => finish());
+
+      // Initial paint: Step 1 of 3, dot 1 current, top-back disabled.
+      updateProgress();
     })();
   </script>
 </body>

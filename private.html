@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<!-- NOORANI_DATA -->
+<script>
+  (function () {
+    const d = window.__NOORANI_DATA__;
+    if (d && d.effectiveTheme) {
+      document.documentElement.setAttribute('data-theme', d.effectiveTheme);
+    }
+  })();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="/css/typography.css">
+<title>Private Browsing</title>
+<style>
+  :root[data-theme="light"] {
+    --bg-primary:     #151515;
+    --text-primary:   #f0ede6;
+    --text-secondary: #b9b4a8;
+    --accent:         #d4af37;
+    --border:         #3a3833;
+    --card-bg:        #1e1e1c;
+  }
+  :root[data-theme="dark"] {
+    --bg-primary:     #101010;
+    --text-primary:   #f0ede6;
+    --text-secondary: #a8a39a;
+    --accent:         #d4af37;
+    --border:         #322f2a;
+    --card-bg:        #191917;
+  }
+
+  /* Private Browsing lands the same dark shell regardless of the app's
+     light/dark theme setting — this page's whole job is to visually read
+     as "different from your normal browsing", not to match the theme. */
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    min-height: 100vh;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+  }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    padding: 40px 24px;
+  }
+  .wrap {
+    max-width: 560px;
+    text-align: center;
+  }
+  .icon {
+    width: 56px; height: 56px;
+    margin: 0 auto 24px;
+    color: var(--accent);
+  }
+  h1 {
+    font-family: var(--font-serif);
+    font-weight: 400;
+    font-size: var(--text-3xl);
+    margin: 0 0 16px 0;
+  }
+  .lede {
+    font-size: var(--text-base);
+    color: var(--text-secondary);
+    line-height: 1.6;
+    margin: 0 0 32px 0;
+  }
+  .lists {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    text-align: left;
+  }
+  @media (max-width: 480px) {
+    .lists { grid-template-columns: 1fr; }
+  }
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 20px;
+  }
+  .card h2 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 600;
+    margin: 0 0 10px 0;
+    color: var(--text-secondary);
+  }
+  .card--still h2 { color: #7fb87f; }
+  .card--not h2   { color: #c98a8a; }
+  .card ul {
+    margin: 0; padding: 0 0 0 18px;
+    font-size: 13px;
+    line-height: 1.8;
+    color: var(--text-primary);
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5z"></path>
+      <line x1="3" y1="3" x2="21" y2="21"></line>
+    </svg>
+    <h1>Private Browsing</h1>
+    <p class="lede">
+      This is a private window. When you close it, Noorani won't save the pages
+      you visited, your search history, cookies, or downloads. Bookmarks and
+      prayer times still work normally.
+    </p>
+    <div class="lists">
+      <div class="card card--still">
+        <h2>Still tracked</h2>
+        <ul>
+          <li>Content filter still blocks haram sites</li>
+          <li>Prayer times still show</li>
+          <li>Your bookmarks are still available</li>
+        </ul>
+      </div>
+      <div class="card card--not">
+        <h2>Not tracked</h2>
+        <ul>
+          <li>History</li>
+          <li>Cookies</li>
+          <li>Cached files</li>
+          <li>Downloads list</li>
+          <li>Site permissions</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

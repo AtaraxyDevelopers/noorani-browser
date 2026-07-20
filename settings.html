@@ -366,6 +366,20 @@
           <div class="row__hint">Toggle quickly with Ctrl+Shift+B.</div>
         </div>
       </div>
+      <div class="row">
+        <div class="row__label">Language</div>
+        <div class="row__control">
+          <select id="language-select">
+            <option value="en">English</option>
+            <option value="ur">Urdu (اردو)</option>
+            <option value="ar">Arabic (العربية)</option>
+            <option value="id">Bahasa Indonesia</option>
+            <option value="tr">Turkish (Türkçe)</option>
+            <option value="ms">Malay (Bahasa Melayu)</option>
+          </select>
+          <div class="row__hint">Only English is available today — other languages are on the way.</div>
+        </div>
+      </div>
     </section>
 
     <!-- PRIVACY -->
@@ -387,6 +401,41 @@
         <div class="row__control">
           <button class="btn--danger" id="clear-btn">Clear Selected Data</button>
           <span class="clear-status" id="clear-status"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- SITE PERMISSIONS (Phase v1.0.1 Part B) -->
+    <section class="section" id="site-permissions-section">
+      <h2>Site Permissions</h2>
+      <div class="row">
+        <div class="row__label">Remembered sites</div>
+        <div class="row__control">
+          <div id="permissions-table"></div>
+          <div class="row__hint" id="permissions-status" style="font-family: var(--font-sans);"></div>
+        </div>
+      </div>
+      <div class="row">
+        <div class="row__label"></div>
+        <div class="row__control">
+          <button class="btn--danger" id="permissions-clear-btn">Clear all site permissions</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- PRIVATE BROWSING (Phase v1.0.1 Part E) -->
+    <section class="section" id="private-browsing-section">
+      <h2>Private Browsing</h2>
+      <div class="row">
+        <div class="row__label">Always open external links in a private window</div>
+        <div class="row__control">
+          <label class="switch"><input type="checkbox" id="private-external-links"><span class="switch__slider"></span></label>
+        </div>
+      </div>
+      <div class="row">
+        <div class="row__label">Ask before closing a private window with multiple tabs</div>
+        <div class="row__control">
+          <label class="switch"><input type="checkbox" id="private-confirm-close"><span class="switch__slider"></span></label>
         </div>
       </div>
     </section>
@@ -870,6 +919,132 @@
           if (next && next.ui) {
             settings.ui = next.ui;
             syncBookmarkBarRadios(next.ui);
+          }
+        });
+      }
+
+      // ===== Interface / Language (Phase v1.0.1 Part H) =====
+      // Only English is implemented. Selecting anything else pops the same
+      // "coming in v1.1" capture modal onboarding uses, then reverts the
+      // select back to English — there's no functional path today for
+      // interface.language to end up as anything else.
+      const langSelSettings = document.getElementById('language-select');
+      const LANGUAGE_NAMES = {
+        ur: 'Urdu', ar: 'Arabic', id: 'Bahasa Indonesia', tr: 'Turkish', ms: 'Malay'
+      };
+      langSelSettings.value =
+        (settings.features && settings.features.interface && settings.features.interface.language) || 'en';
+
+      langSelSettings.addEventListener('change', async () => {
+        const value = langSelSettings.value;
+        if (value === 'en') return;
+        const langName = LANGUAGE_NAMES[value] || value;
+        const result = await window.nooraniModal.form({
+          title:   `${langName} language support coming in v1.1`,
+          message: 'Full internationalization with proper right-to-left layout is planned for our next release. Enter your email to be notified when your language is ready.',
+          fields: [
+            { key: 'email', label: 'Email', value: '', type: 'email', placeholder: 'you@example.com',
+              validate: (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) ? null : 'Enter a valid email' }
+          ],
+          confirmText: 'Notify me',
+          cancelText:  'Continue in English'
+        });
+        if (result && result.email && api && api.language) {
+          await api.language.reportInterest(result.email, langName);
+        }
+        langSelSettings.value = 'en';
+      });
+
+      // ===== Site Permissions (Phase v1.0.1 Part B) =====
+      const permissionsTable  = document.getElementById('permissions-table');
+      const permissionsStatus = document.getElementById('permissions-status');
+      const PERMISSION_LABELS = {
+        camera: 'Camera', microphone: 'Microphone', geolocation: 'Location',
+        notifications: 'Notifications', midi: 'MIDI', pointerLock: 'Pointer Lock',
+        fullscreen: 'Fullscreen', openExternal: 'Open External Apps',
+        'clipboard-read': 'Clipboard Read'
+      };
+
+      function renderPermissionsTable(perms) {
+        const origins = Object.keys(perms || {}).sort();
+        if (!origins.length) {
+          permissionsTable.innerHTML = '<div style="color: var(--muted); font-size: 12px; padding: 4px 0;">' +
+            'No sites remembered yet. Allow or deny a permission prompt and check "Remember for this site" to see it here.' +
+            '</div>';
+          return;
+        }
+        let html = '<div style="display: flex; flex-direction: column; gap: 4px;">';
+        for (const origin of origins) {
+          const rec = perms[origin] || {};
+          const summary = Object.entries(rec)
+            .map(([k, v]) => `${PERMISSION_LABELS[k] || k}: ${v === 'allow' ? 'Allowed' : 'Denied'}`)
+            .join(', ');
+          html += `<div style="display: flex; justify-content: space-between; align-items: center; ` +
+                  `padding: 6px 10px; background: var(--page-bg); border-radius: 6px; gap: 12px;">` +
+                  `<span style="min-width:0;">` +
+                    `<span style="font-family: 'SFMono-Regular', Consolas, monospace; font-size: 12px; display:block;">${origin}</span>` +
+                    `<span style="font-size: 11px; color: var(--muted);">${summary}</span>` +
+                  `</span>` +
+                  `<button data-remove-origin="${origin}" style="padding: 4px 10px; font-size: 11px; flex: 0 0 auto;">Remove</button>` +
+                  `</div>`;
+        }
+        html += '</div>';
+        permissionsTable.innerHTML = html;
+        permissionsTable.querySelectorAll('[data-remove-origin]').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            if (!api) return;
+            const next = await api.permissions.remove(btn.dataset.removeOrigin);
+            renderPermissionsTable(next);
+          });
+        });
+      }
+
+      if (api && api.permissions) {
+        api.permissions.list().then(renderPermissionsTable);
+        if (api.permissions.onChange) api.permissions.onChange(renderPermissionsTable);
+      }
+
+      document.getElementById('permissions-clear-btn').addEventListener('click', async () => {
+        if (!api) return;
+        const confirmed = await window.nooraniModal.confirm({
+          title:       'Clear all site permissions',
+          message:     'Every remembered camera, microphone, location, and other permission decision will be forgotten. Sites will prompt again next time.',
+          confirmText: 'Clear All',
+          variant:     'danger'
+        });
+        if (!confirmed) return;
+        const next = await api.permissions.clear();
+        renderPermissionsTable(next);
+        permissionsStatus.textContent = 'Cleared.';
+        setTimeout(() => { permissionsStatus.textContent = ''; }, 2500);
+      });
+
+      // ===== Private Browsing (Phase v1.0.1 Part E) =====
+      const privateExternalLinks = document.getElementById('private-external-links');
+      const privateConfirmClose  = document.getElementById('private-confirm-close');
+      function syncPrivateBrowsingToggles(pb) {
+        pb = pb || {};
+        privateExternalLinks.checked = !!pb.alwaysExternalLinks;
+        privateConfirmClose.checked  = pb.confirmCloseMultiTab !== false;
+      }
+      syncPrivateBrowsingToggles(settings.privateBrowsing);
+      privateExternalLinks.addEventListener('change', () => {
+        if (!api) return;
+        const next = { ...(settings.privateBrowsing || {}), alwaysExternalLinks: privateExternalLinks.checked };
+        settings.privateBrowsing = next;
+        api.settings.update('privateBrowsing', next);
+      });
+      privateConfirmClose.addEventListener('change', () => {
+        if (!api) return;
+        const next = { ...(settings.privateBrowsing || {}), confirmCloseMultiTab: privateConfirmClose.checked };
+        settings.privateBrowsing = next;
+        api.settings.update('privateBrowsing', next);
+      });
+      if (api && api.settings && api.settings.onChange) {
+        api.settings.onChange((next) => {
+          if (next && next.privateBrowsing) {
+            settings.privateBrowsing = next.privateBrowsing;
+            syncPrivateBrowsingToggles(next.privateBrowsing);
           }
         });
       }

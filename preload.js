@@ -140,6 +140,30 @@ if (isTrusted) {
       clear: (options) => invoke('browsing-data:clear', options)
     },
 
+    zoom: {
+      get: (domain)        => invoke('zoom:get', domain),
+      set: (domain, level) => invoke('zoom:set', { domain, level })
+    },
+
+    permissions: {
+      list:     ()         => invoke('permissions:list'),
+      remove:   (origin)   => invoke('permissions:remove', origin),
+      clear:    ()         => invoke('permissions:clear'),
+      respond:  (payload)  => invoke('permissions:respond', payload),
+      onRequest: subscribe('permission:request'),
+      onChange:  subscribe('permissions:changed')
+    },
+
+    language: {
+      reportInterest: (email, language) => invoke('language:interest', { email, language })
+    },
+
+    window: {
+      detachTab:      (payload) => invoke('tab:detach', payload),
+      openPrivateUrl: (url)     => invoke('window:open-private-url', url),
+      forceClose:     ()        => invoke('window:force-close')
+    },
+
     onboarding: {
       complete: (payload) => invoke('onboarding:complete', payload),
       reset:    ()        => invoke('onboarding:reset')

@@ -14,7 +14,7 @@ let mainWindow = null;
 // Constants
 // ============================================================================
 
-const SETTINGS_VERSION = 5;
+const SETTINGS_VERSION = 6;
 
 // Per-category feature defaults. When new keys are added later, they flow in
 // via the migration path in loadSettings() without wiping existing values.
@@ -125,6 +125,12 @@ const DEVELOPER_DEFAULTS = Object.freeze({
   hijriMonthOverride: null
 });
 
+// Phase v1.0.1 Part E — incognito window behavior preferences.
+const PRIVATE_BROWSING_DEFAULTS = Object.freeze({
+  alwaysExternalLinks:  false,
+  confirmCloseMultiTab: true
+});
+
 const SETTINGS_DEFAULTS = Object.freeze({
   theme:              'light',                   // 'light' | 'dark' | 'auto'
   searchEngine:       'google',
@@ -136,7 +142,8 @@ const SETTINGS_DEFAULTS = Object.freeze({
   features:           FEATURES_DEFAULTS,
   ui:                 UI_DEFAULTS,
   stats:              STATS_DEFAULTS,
-  developer:          DEVELOPER_DEFAULTS
+  developer:          DEVELOPER_DEFAULTS,
+  privateBrowsing:    PRIVATE_BROWSING_DEFAULTS
 });
 
 const SUPPORTED_LANGUAGES = Object.freeze(['en', 'ur', 'ar', 'id', 'tr', 'ms']);
@@ -217,9 +224,10 @@ function migrateSettings(raw) {
       interface:     mergeCategory(FEATURES_DEFAULTS.interface,     rawFeatures.interface),
       ramadan:       mergeCategory(FEATURES_DEFAULTS.ramadan,       rawFeatures.ramadan)
     },
-    ui:        mergeCategory(UI_DEFAULTS,        raw.ui),
-    stats:     mergeCategory(STATS_DEFAULTS,     raw.stats),
-    developer: mergeCategory(DEVELOPER_DEFAULTS, raw.developer),
+    ui:              mergeCategory(UI_DEFAULTS,               raw.ui),
+    stats:           mergeCategory(STATS_DEFAULTS,            raw.stats),
+    developer:       mergeCategory(DEVELOPER_DEFAULTS,        raw.developer),
+    privateBrowsing: mergeCategory(PRIVATE_BROWSING_DEFAULTS, raw.privateBrowsing),
     version:   SETTINGS_VERSION
   };
 
@@ -244,6 +252,8 @@ function migrateSettings(raw) {
   normalizeRamadan(merged.features.ramadan);
   normalizeStats(merged.stats);
   normalizeDeveloper(merged.developer);
+  merged.privateBrowsing.alwaysExternalLinks  = !!merged.privateBrowsing.alwaysExternalLinks;
+  merged.privateBrowsing.confirmCloseMultiTab = !!merged.privateBrowsing.confirmCloseMultiTab;
   return merged;
 }
 
@@ -529,7 +539,8 @@ function registerNooraniProtocol() {
         return new Response('Not Found', { status: 404 });
       }
       if (page === 'home' || page === 'settings' || page === 'welcome' ||
-          page === 'blocked' || page === 'quran' || page === 'duas') {
+          page === 'blocked' || page === 'quran' || page === 'duas' ||
+          page === 'private') {
         const html = buildInternalHtml(page, u.search);
         if (!html) return new Response('Template missing', { status: 500 });
         return new Response(html, {
@@ -664,6 +675,145 @@ function registerWebRequestBlocker() {
     { urls: ['<all_urls>'] },
     handleRequest
   );
+}
+
+// ============================================================================
+// Site permissions (Phase v1.0.1 Part B) — camera / mic / location / etc.
+// ============================================================================
+// In-memory mirror of site-permissions.json, kept in sync by every write
+// path (IPC remove/clear, and rememberDecision below) so the synchronous
+// setPermissionCheckHandler never has to touch disk on the hot path.
+let permissionsCache = {};
+
+const HANDLED_PERMISSIONS = new Set([
+  'media', 'geolocation', 'notifications', 'midi',
+  'pointerLock', 'fullscreen', 'openExternal', 'clipboard-read'
+]);
+
+function normalizeOrigin(raw) {
+  try { return new URL(raw).origin; } catch (_) { return String(raw || 'unknown'); }
+}
+
+// 'media' bundles camera+mic under one Electron permission string; split it
+// into the per-capability keys the settings UI and storage schema use.
+// details.mediaTypes (when Electron supplies it) tells us which of the two
+// were actually requested — a mic-only call shouldn't need a camera grant.
+function permissionTypesFor(permission, details) {
+  if (permission === 'media') {
+    const mt = (details && Array.isArray(details.mediaTypes) && details.mediaTypes.length)
+      ? details.mediaTypes
+      : ['audio', 'video'];
+    return mt.map((t) => t === 'audio' ? 'microphone' : t === 'video' ? 'camera' : t);
+  }
+  return [permission];
+}
+
+function checkPermission(requestingOrigin, permission, details, store) {
+  if (!HANDLED_PERMISSIONS.has(permission)) return false;
+  const origin = normalizeOrigin(requestingOrigin);
+  const types = permissionTypesFor(permission, details);
+  const rec = store[origin];
+  if (!rec) return false;
+  return types.every((t) => rec[t] === 'allow');
+}
+
+let permissionRequestCounter = 0;
+// requestId -> { callback, types, origin, getStore, persistStore, timeout }
+const pendingPermissionRequests = new Map();
+
+// installPermissionHandlers is called once for session.defaultSession (all
+// normal windows share it) and once per incognito window on its own
+// ephemeral session. isIncognito swaps disk-backed storage for an in-memory
+// object that's garbage-collected with the session when the window closes —
+// per spec, incognito "remembers" nothing across restarts and never touches
+// site-permissions.json.
+function installPermissionHandlers(sess, opts) {
+  opts = opts || {};
+  const isIncognito = !!opts.isIncognito;
+  const memStore = isIncognito ? {} : null;
+
+  function getStore() { return isIncognito ? memStore : permissionsCache; }
+  function persistStore(store) {
+    if (isIncognito) { Object.assign(memStore, store); return; }
+    saveJSON('site-permissions.json', store);
+    permissionsCache = store;
+    broadcastToAll('permissions:changed', store);
+  }
+
+  sess.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    handlePermissionRequest(webContents, permission, callback, details, getStore, persistStore);
+  });
+  sess.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
+    return checkPermission(requestingOrigin, permission, details, getStore());
+  });
+}
+
+function handlePermissionRequest(webContents, permission, callback, details, getStore, persistStore) {
+  if (!HANDLED_PERMISSIONS.has(permission)) { callback(false); return; }
+
+  const origin = normalizeOrigin((details && details.requestingUrl) || webContents.getURL());
+  const types  = permissionTypesFor(permission, details);
+  const store  = getStore();
+  const rec    = store[origin];
+
+  // Fully remembered (every requested type has a stored decision) — resolve
+  // without prompting. A single denied type sinks the whole request, same
+  // as a real permission grant would (you can't half-allow "media").
+  if (rec && types.every((t) => rec[t] !== undefined)) {
+    callback(types.every((t) => rec[t] === 'allow'));
+    return;
+  }
+
+  // Guest webContents (the <webview> the request came from) exposes
+  // hostWebContents pointing back at the chrome window that embeds it.
+  const hostWc = webContents.hostWebContents || webContents;
+  const win = BrowserWindow.fromWebContents(hostWc) || BrowserWindow.getFocusedWindow() || mainWindow;
+  if (!win || win.isDestroyed()) { callback(false); return; }
+
+  const requestId = 'perm_' + (++permissionRequestCounter) + '_' + Date.now();
+  // Safety net: if the renderer never responds (window closed mid-prompt,
+  // renderer crash), don't leave the site's getUserMedia() promise hanging
+  // forever — deny after a minute.
+  const timeout = setTimeout(() => {
+    if (pendingPermissionRequests.has(requestId)) {
+      pendingPermissionRequests.delete(requestId);
+      callback(false);
+    }
+  }, 60000);
+
+  pendingPermissionRequests.set(requestId, { callback, types, origin, getStore, persistStore, timeout });
+
+  try {
+    win.webContents.send('permission:request', {
+      requestId, origin, types,
+      siteName: origin.replace(/^https?:\/\//, '')
+    });
+  } catch (_) {
+    clearTimeout(timeout);
+    pendingPermissionRequests.delete(requestId);
+    callback(false);
+  }
+}
+
+// Called from the 'permissions:respond' IPC handler once the renderer's
+// in-app modal resolves.
+function respondToPermissionRequest(payload) {
+  const requestId = payload && payload.requestId;
+  const entry = requestId && pendingPermissionRequests.get(requestId);
+  if (!entry) return;
+  pendingPermissionRequests.delete(requestId);
+  clearTimeout(entry.timeout);
+
+  const allow = payload.action === 'allow';
+  entry.callback(allow);
+
+  if (payload.remember) {
+    const store = entry.getStore();
+    const rec = { ...(store[entry.origin] || {}) };
+    for (const t of entry.types) rec[t] = allow ? 'allow' : 'deny';
+    store[entry.origin] = rec;
+    entry.persistStore(store);
+  }
 }
 
 function incrementBlockedCounter() {
@@ -1652,6 +1802,111 @@ function registerIpc() {
     broadcastToAll('duas:changed', list);
     return list;
   });
+
+  // Zoom (Phase v1.0.1 Part D) ----------------------------------------------
+  // Per-domain zoom level, keyed on hostname (with "www." stripped by the
+  // renderer before it ever reaches us). 0 (= 100%, the default) is never
+  // stored — an absent key and a stored 0 mean the same thing, so pruning
+  // keeps the file from growing unbounded as the user visits sites at the
+  // default zoom.
+  ipcMain.handle('zoom:get', (_e, domain) => {
+    const d = String(domain || '').trim().toLowerCase();
+    if (!d) return 0;
+    const zooms = loadJSON('zoom-levels.json', {});
+    const level = zooms[d];
+    return typeof level === 'number' && Number.isFinite(level) ? level : 0;
+  });
+  ipcMain.handle('zoom:set', (_e, payload) => {
+    const d = String((payload && payload.domain) || '').trim().toLowerCase();
+    if (!d) return { error: 'no-domain' };
+    const level = Number(payload && payload.level);
+    if (!Number.isFinite(level)) return { error: 'bad-level' };
+    const clamped = Math.max(-3, Math.min(3, level));
+    const zooms = loadJSON('zoom-levels.json', {});
+    if (clamped === 0) delete zooms[d];
+    else zooms[d] = clamped;
+    saveJSON('zoom-levels.json', zooms);
+    return { ok: true };
+  });
+
+  // Site permissions (Phase v1.0.1 Part B) -----------------------------------
+  ipcMain.handle('permissions:list', () => loadJSON('site-permissions.json', {}));
+  ipcMain.handle('permissions:remove', (_e, origin) => {
+    const o = String(origin || '');
+    const perms = loadJSON('site-permissions.json', {});
+    delete perms[o];
+    saveJSON('site-permissions.json', perms);
+    permissionsCache = perms;
+    broadcastToAll('permissions:changed', perms);
+    return perms;
+  });
+  ipcMain.handle('permissions:clear', () => {
+    saveJSON('site-permissions.json', {});
+    permissionsCache = {};
+    broadcastToAll('permissions:changed', {});
+    return {};
+  });
+  ipcMain.handle('permissions:respond', (_e, payload) => {
+    respondToPermissionRequest(payload || {});
+  });
+
+  // Language interest capture (Phase v1.0.1 Part H) --------------------------
+  ipcMain.handle('language:interest', (_e, payload) => {
+    const email = String((payload && payload.email) || '').trim();
+    const language = String((payload && payload.language) || '').trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !language) {
+      return { error: 'invalid' };
+    }
+    const list = loadJSON('language-interest.json', []);
+    list.push({ email, language, submittedAt: new Date().toISOString() });
+    saveJSON('language-interest.json', list);
+    return { ok: true };
+  });
+
+  // Tab detach (Phase v1.0.1 Part C) -----------------------------------------
+  // The renderer has already decided (via its own dragover tracking) that
+  // the user dragged a tab out of the tab strip. We just need to figure out
+  // where it lands: onto another Noorani window under the cursor, or into
+  // a fresh one.
+  ipcMain.handle('tab:detach', (event, payload) => {
+    payload = payload || {};
+    const url = String(payload.url || '').trim();
+    if (!url) return { error: 'no-url' };
+    const sourceWin = BrowserWindow.fromWebContents(event.sender);
+
+    if (Number.isFinite(payload.screenX) && Number.isFinite(payload.screenY)) {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (win === sourceWin || win.isDestroyed() || !win.isVisible()) continue;
+        const b = win.getBounds();
+        if (payload.screenX >= b.x && payload.screenX <= b.x + b.width &&
+            payload.screenY >= b.y && payload.screenY <= b.y + b.height) {
+          try { win.webContents.send('shortcut', 'open-tab-url', url); } catch (_) {}
+          win.focus();
+          return { droppedInto: true };
+        }
+      }
+    }
+
+    createSecondaryWindow({ openUrl: url });
+    return { droppedInto: false };
+  });
+
+  // Private windows (Phase v1.0.1 Part E) ------------------------------------
+  // "New Private Window" itself is a File-menu item and runs entirely in
+  // main (click => createIncognitoWindow() directly) — this handler exists
+  // for the one path that has to originate in a renderer: the webview
+  // context menu's "Open Link in Private Window".
+  ipcMain.handle('window:open-private-url', (_e, url) => {
+    createIncognitoWindow(String(url || '').trim() || null);
+    return { ok: true };
+  });
+  ipcMain.handle('window:force-close', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (win && !win.isDestroyed()) {
+      win.__nooraniAllowClose = true;
+      win.close();
+    }
+  });
 }
 
 // Coerce a raw dua payload into the canonical schema. Rejects if it has no
@@ -1679,8 +1934,14 @@ function normalizeDua(entry) {
 // ============================================================================
 
 function sendShortcut(action, ...args) {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('shortcut', action, ...args);
+  // Route to whichever Noorani window is focused (v1.0.1: detached tab
+  // windows and incognito windows mean mainWindow is no longer the only
+  // window that can receive menu-accelerator actions), falling back to
+  // mainWindow if nothing is focused (e.g. accelerator fired right as
+  // focus was transitioning).
+  const win = BrowserWindow.getFocusedWindow() || mainWindow;
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('shortcut', action, ...args);
   }
 }
 
@@ -1692,6 +1953,13 @@ function buildMenu() {
   }));
 
   const template = [
+    {
+      label: 'File',
+      submenu: [
+        { label: 'New Private Window', accelerator: 'CmdOrCtrl+Shift+N',
+          click: () => createIncognitoWindow() }
+      ]
+    },
     {
       label: 'Tabs',
       submenu: [
@@ -1722,6 +1990,10 @@ function buildMenu() {
       submenu: [
         { label: 'Toggle Bookmark Bar', accelerator: 'CmdOrCtrl+Shift+B',
           click: () => sendShortcut('toggle-bookmark-bar') },
+        { type: 'separator' },
+        { label: 'Zoom In',    accelerator: 'CmdOrCtrl+=', click: () => sendShortcut('zoom-in') },
+        { label: 'Zoom Out',   accelerator: 'CmdOrCtrl+-', click: () => sendShortcut('zoom-out') },
+        { label: 'Reset Zoom', accelerator: 'CmdOrCtrl+0', click: () => sendShortcut('zoom-reset') },
         { type: 'separator' },
         { label: 'Toggle DevTools',     accelerator: 'CmdOrCtrl+Shift+I',
           role: 'toggleDevTools' }
@@ -1859,6 +2131,125 @@ function createWindow() {
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
+// ============================================================================
+// Secondary windows — detached tabs (Part C) + incognito (Part E)
+// ============================================================================
+// Deliberately NOT wired into the window-state persistence createWindow()
+// uses for the original mainWindow: a detached-tab or incognito window's
+// size/position should never overwrite the user's saved main-window layout,
+// and closing one shouldn't touch window-state.json at all.
+const secondaryWindows = new Set();
+
+function createSecondaryWindow(opts) {
+  opts = opts || {};
+  const focused = BrowserWindow.getFocusedWindow();
+  const baseBounds = (focused && !focused.isDestroyed()) ? focused.getBounds() : null;
+
+  const options = {
+    width:           WINDOW_DEFAULT_WIDTH,
+    height:          WINDOW_DEFAULT_HEIGHT,
+    minWidth:        WINDOW_MIN_WIDTH,
+    minHeight:       WINDOW_MIN_HEIGHT,
+    title:           opts.incognito ? 'Private Browsing — Noorani' : 'Noorani Browser',
+    backgroundColor: opts.incognito ? '#151515' : '#faf7f2',
+    autoHideMenuBar: true,
+    icon:            path.join(__dirname, 'assets', 'icons', 'icon-256.png'),
+    webPreferences: {
+      preload:          path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration:  false,
+      webviewTag:       true
+    }
+  };
+  // Cascade off whichever window was focused, so a new window never opens
+  // in the exact same spot as the one it came from.
+  if (baseBounds) {
+    options.x = baseBounds.x + 32;
+    options.y = baseBounds.y + 32;
+  }
+
+  const win = new BrowserWindow(options);
+  win.setMenuBarVisibility(false);
+
+  const params = new URLSearchParams();
+  if (opts.openUrl) params.set('openUrl', opts.openUrl);
+  if (opts.incognito) {
+    params.set('incognito', '1');
+    params.set('partition', opts.partition);
+  }
+  const query = params.toString();
+  win.loadFile(path.join(__dirname, 'index.html'), query ? { search: query } : undefined);
+  win.maximize();
+  win.focus();
+
+  // "Ask before closing a private window with multiple tabs" (Part E
+  // setting) — intercept the close, hand it to the renderer's own tab
+  // count + nooraniModal, and only actually close once it says go ahead
+  // (via the window:force-close IPC handler, which sets this flag first).
+  if (opts.incognito) {
+    win.on('close', (e) => {
+      if (win.__nooraniAllowClose) return;
+      const s = loadSettings();
+      if (!s.privateBrowsing || s.privateBrowsing.confirmCloseMultiTab === false) return;
+      e.preventDefault();
+      try { win.webContents.send('shortcut', 'confirm-close-private'); } catch (_) {}
+    });
+  }
+
+  secondaryWindows.add(win);
+  win.on('closed', () => secondaryWindows.delete(win));
+  return win;
+}
+
+// ============================================================================
+// Incognito / private windows (Phase v1.0.1 Part E)
+// ============================================================================
+let incognitoWindowCounter = 0;
+
+// session.fromPartition('incognito:' + id) — WITHOUT a "persist:" prefix —
+// is Electron's own ephemeral-session convention: it lives only in memory
+// and is garbage-collected once nothing references it anymore (i.e. once
+// the window closes), so cookies/cache/localStorage for that window simply
+// cease to exist. A "persist:" prefix would have written it to disk, which
+// is exactly what a private window must never do.
+function createIncognitoWindow(openUrl) {
+  const partitionName = 'incognito:' + Date.now() + '_' + (++incognitoWindowCounter);
+  const sess = session.fromPartition(partitionName);
+
+  normalizeUserAgent(sess);
+  installPermissionHandlers(sess, { isIncognito: true });
+  // Content filter (halal/riba/gambling/Ramadan) must still apply — the
+  // filter's decision logic (handleRequest) reads from module-level state,
+  // not session-specific state, so attaching it to this session too is
+  // enough; no separate "incognito blocklist" needed.
+  sess.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, handleRequest);
+
+  return createSecondaryWindow({
+    incognito: true,
+    partition: partitionName,
+    openUrl:   openUrl || undefined
+  });
+}
+
+// ============================================================================
+// User-Agent normalization (Phase v1.0.1 Part A)
+// ============================================================================
+// Electron's default UA embeds "Electron/x.y.z" (and would embed a
+// "NooraniBrowser/x.y" token too, if one were ever added to it), which
+// several sites — WhatsApp Web, Google Meet, some banking portals — sniff
+// for and refuse to serve, showing an "unsupported browser" wall. Stripping
+// those tokens leaves a standard Chrome UA string, which is all any of
+// those sites actually check for.
+function normalizeUserAgent(sess) {
+  try {
+    sess.setUserAgent(
+      sess.getUserAgent()
+        .replace(/Electron\/[\d.]+\s*/, '')
+        .replace(/NooraniBrowser\/[\d.]+\s*/, '')
+    );
+  } catch (_) { /* swallow — session may already be gone */ }
+}
+
 // Windows taskbar grouping — must be set before the first window opens.
 if (process.platform === 'win32') {
   app.setAppUserModelId('com.noorani.browser');
@@ -1869,6 +2260,24 @@ app.whenReady().then(() => {
   // Verify bundled Quran data is intact (6236 verses across all three files)
   // before any renderer asks for it.
   quranData.assertIntegrity();
+
+  // UA fix must land before any webview loads content — apply to the
+  // default session immediately, and to every future webview's guest
+  // WebContents (belt-and-suspenders: covers guests on sessions other than
+  // defaultSession, e.g. incognito partitions, where we may forget to call
+  // normalizeUserAgent() explicitly at session-creation time).
+  normalizeUserAgent(session.defaultSession);
+  app.on('web-contents-created', (_event, contents) => {
+    if (contents.getType() !== 'window') return;
+    contents.on('did-attach-webview', (_e, webviewContents) => {
+      try {
+        webviewContents.setUserAgent(
+          webviewContents.getUserAgent().replace(/Electron\/[\d.]+\s*/, '')
+        );
+      } catch (_) { /* swallow */ }
+    });
+  });
+
   registerNooraniProtocol();
   setupDownloads();
   registerIpc();
@@ -1877,6 +2286,9 @@ app.whenReady().then(() => {
   // the bundled curated list; StevenBlack refresh is background async.
   contentProtectionLoad();
   registerWebRequestBlocker();
+
+  permissionsCache = loadJSON('site-permissions.json', {});
+  installPermissionHandlers(session.defaultSession, { isIncognito: false });
   Menu.setApplicationMenu(buildMenu());
   createWindow();
 
