@@ -79,7 +79,7 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "WaleedNaeem",
+      "owner": "AtaraxyDevelopers",
       "repo": "noorani-browser"
     }
   },
