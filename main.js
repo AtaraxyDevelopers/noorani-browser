@@ -405,8 +405,12 @@ function getEffectiveTheme(settings) {
 }
 
 function getVersions() {
+  // package.json's "version" stays a plain 4-segment string electron-builder
+  // can read as a Windows FILEVERSION (app.getVersion() reflects it as-is);
+  // the trailing ".0" here is purely the fuller display form shown in the UI
+  // (home footer, Settings > About) — single source so both stay in sync.
   return {
-    app:      app.getVersion(),
+    app:      app.getVersion() + '.0',
     electron: process.versions.electron,
     chromium: process.versions.chrome,
     node:     process.versions.node
@@ -494,8 +498,15 @@ const NOORANI_ASSETS = Object.freeze({
   '/assets/fonts/AmiriQuran-Regular.ttf':   'font/ttf'
 });
 
-function registerNooraniProtocol() {
-  protocol.handle('noorani', (request) => {
+// protocol.handle() (the top-level electron.protocol module) only registers
+// on session.defaultSession — a session created via session.fromPartition()
+// (every incognito window's guest session) needs its own registration or
+// noorani:// requests inside it fall through as an unhandled external
+// protocol, which is what was producing the "wants to open external
+// application" prompt for Home/Quran/Duas/Settings in private windows.
+function registerNooraniProtocol(sess) {
+  const target = sess ? sess.protocol : protocol;
+  target.handle('noorani', (request) => {
     try {
       const u = new URL(request.url);
       const page = u.hostname;
@@ -709,6 +720,13 @@ function permissionTypesFor(permission, details) {
 }
 
 function checkPermission(requestingOrigin, permission, details, store) {
+  // Sanitized clipboard writes (navigator.clipboard.writeText) are never
+  // gated behind a permission prompt in real Chrome when triggered by a
+  // user gesture — installing our own setPermissionCheckHandler overrides
+  // Electron's default (silently-allow) behavior for every permission type
+  // Chromium queries, including this one, so it has to be allowed explicitly
+  // here or every clipboard.writeText() call in every webview just fails.
+  if (permission === 'clipboard-sanitized-write') return true;
   if (!HANDLED_PERMISSIONS.has(permission)) return false;
   const origin = normalizeOrigin(requestingOrigin);
   const types = permissionTypesFor(permission, details);
@@ -749,6 +767,7 @@ function installPermissionHandlers(sess, opts) {
 }
 
 function handlePermissionRequest(webContents, permission, callback, details, getStore, persistStore) {
+  if (permission === 'clipboard-sanitized-write') { callback(true); return; }
   if (!HANDLED_PERMISSIONS.has(permission)) { callback(false); return; }
 
   const origin = normalizeOrigin((details && details.requestingUrl) || webContents.getURL());
@@ -1454,7 +1473,17 @@ function registerIpc() {
     if (options.history)   saveJSON('history.json',   []);
     if (options.bookmarks) saveJSON('bookmarks.json', []);
     if (options.downloads) { downloads.length = 0; broadcastDownloads(); }
-    if (options.settings)  saveSettings({ ...SETTINGS_DEFAULTS });
+    if (options.settings)  {
+      saveSettings({ ...SETTINGS_DEFAULTS });
+      // Per-domain zoom lives in its own file (zoom-levels.json), not in
+      // settings.json — "Reset to Default" has to clear it explicitly and
+      // snap every currently-open webContents back to 100% immediately,
+      // or already-open tabs keep whatever zoom they had until next visit.
+      saveJSON('zoom-levels.json', {});
+      for (const wc of webContents.getAllWebContents()) {
+        if (!wc.isDestroyed()) { try { wc.setZoomLevel(0); } catch (_) {} }
+      }
+    }
 
     if (options.history)   broadcastToAll('history:changed',   []);
     if (options.bookmarks) broadcastToAll('bookmarks:changed', []);
@@ -1887,7 +1916,16 @@ function registerIpc() {
       }
     }
 
-    createSecondaryWindow({ openUrl: url });
+    // A tab dragged out of an incognito window must land in another
+    // incognito window on the SAME (still-alive) partition — otherwise the
+    // detached tab silently becomes a normal, disk-persisted session.
+    const sourcePartition = sourceWin && sourceWin.__nooraniIncognitoPartition;
+    if (sourcePartition) {
+      createSecondaryWindow({ incognito: true, partition: sourcePartition, openUrl: url })
+        .__nooraniIncognitoPartition = sourcePartition;
+    } else {
+      createSecondaryWindow({ openUrl: url });
+    }
     return { droppedInto: false };
   });
 
@@ -2217,6 +2255,8 @@ function createIncognitoWindow(openUrl) {
   const sess = session.fromPartition(partitionName);
 
   normalizeUserAgent(sess);
+  applyGoogleAuthHeaderOverride(sess);
+  registerNooraniProtocol(sess);
   installPermissionHandlers(sess, { isIncognito: true });
   // Content filter (halal/riba/gambling/Ramadan) must still apply — the
   // filter's decision logic (handleRequest) reads from module-level state,
@@ -2224,11 +2264,15 @@ function createIncognitoWindow(openUrl) {
   // enough; no separate "incognito blocklist" needed.
   sess.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, handleRequest);
 
-  return createSecondaryWindow({
+  const win = createSecondaryWindow({
     incognito: true,
     partition: partitionName,
     openUrl:   openUrl || undefined
   });
+  // Lets tab:detach recreate this same private session (rather than a
+  // normal one) when a tab is dragged out of this window into a new one.
+  win.__nooraniIncognitoPartition = partitionName;
+  return win;
 }
 
 // ============================================================================
@@ -2250,6 +2294,32 @@ function normalizeUserAgent(sess) {
   } catch (_) { /* swallow — session may already be gone */ }
 }
 
+// Bug 2 — Google's sign-in flow (accounts.google.com / accounts.youtube.com)
+// blocks embedded/Electron browsers even after normalizeUserAgent() leaves a
+// clean Chrome UA string, because it also cross-checks the Sec-CH-UA client
+// hint — Electron's Chromium build reports that header without a "Google
+// Chrome" brand entry, which is itself a tell. Overriding both headers, and
+// only for these two auth hosts, clears the block without spoofing anything
+// on sites that don't need it.
+const GOOGLE_AUTH_HOSTS = ['accounts.google.com', 'accounts.youtube.com'];
+
+function applyGoogleAuthHeaderOverride(sess) {
+  try {
+    sess.webRequest.onBeforeSendHeaders(
+      { urls: GOOGLE_AUTH_HOSTS.map((h) => `*://${h}/*`) },
+      (details, callback) => {
+        const ua = sess.getUserAgent();
+        const chromeVersion = (ua.match(/Chrome\/(\d+)/) || [])[1] || '120';
+        details.requestHeaders['User-Agent'] = ua;
+        details.requestHeaders['Sec-CH-UA'] =
+          `"Chromium";v="${chromeVersion}", "Google Chrome";v="${chromeVersion}", "Not-A.Brand";v="99"`;
+        details.requestHeaders['Sec-CH-UA-Mobile'] = '?0';
+        callback({ requestHeaders: details.requestHeaders });
+      }
+    );
+  } catch (_) { /* swallow — session may already be gone */ }
+}
+
 // Windows taskbar grouping — must be set before the first window opens.
 if (process.platform === 'win32') {
   app.setAppUserModelId('com.noorani.browser');
@@ -2267,6 +2337,7 @@ app.whenReady().then(() => {
   // defaultSession, e.g. incognito partitions, where we may forget to call
   // normalizeUserAgent() explicitly at session-creation time).
   normalizeUserAgent(session.defaultSession);
+  applyGoogleAuthHeaderOverride(session.defaultSession);
   app.on('web-contents-created', (_event, contents) => {
     if (contents.getType() !== 'window') return;
     contents.on('did-attach-webview', (_e, webviewContents) => {

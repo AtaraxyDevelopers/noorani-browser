@@ -56,6 +56,11 @@ const IS_INCOGNITO  = _bootParams.get('incognito') === '1';
 const INCOGNITO_PARTITION = _bootParams.get('partition') || null;
 
 if (IS_INCOGNITO) document.documentElement.setAttribute('data-incognito', '1');
+// History is disk-backed (history:add already no-ops for incognito, see
+// below) — the button itself must never even be reachable in a private
+// window, matching how quran-btn/duas-btn are gated on their own feature
+// flags elsewhere in this file.
+if (IS_INCOGNITO) historyBtn.hidden = true;
 
 const FALLBACK_FAVICON =
   'data:image/svg+xml;utf8,' + encodeURIComponent(

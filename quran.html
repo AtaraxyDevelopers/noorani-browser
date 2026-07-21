@@ -118,7 +118,10 @@
       grid-template-columns: 280px 1fr;
       min-height: calc(100vh - 54px);
     }
-    .qr-layout[data-sidebar="hidden"] { grid-template-columns: 0 1fr; }
+    /* A single 1fr column, not "0 1fr" — with the sidebar display:none'd,
+       it's removed from grid formation entirely, so a leftover 0-width
+       first track just traps the reader in it instead of the freed space. */
+    .qr-layout[data-sidebar="hidden"] { grid-template-columns: 1fr; }
     .qr-layout[data-sidebar="hidden"] .qr-sidebar { display: none; }
 
     /* ——— Sidebar ——— */

@@ -362,6 +362,19 @@
       const countEl = document.getElementById('d-count');
       const listEl  = document.getElementById('d-list');
 
+      // A notes textarea's own autosave (below) triggers duas:changed, which
+      // echoes back into this same window's onChange handler — without this,
+      // every rebuild here would steal focus out from under the user mid-type.
+      const active = document.activeElement;
+      let focusRestore = null;
+      if (active && active.classList && active.classList.contains('d-notes__input')) {
+        focusRestore = {
+          id:    active.getAttribute('data-notes-for'),
+          start: active.selectionStart,
+          end:   active.selectionEnd
+        };
+      }
+
       if (state.all.length === 0) {
         emptyEl.style.display = '';
         countEl.textContent = '';
@@ -413,6 +426,17 @@
       }
       listEl.innerHTML = html;
       wireItemActions();
+
+      if (focusRestore) {
+        const next = listEl.querySelector(
+          `.d-notes__input[data-notes-for="${CSS.escape(focusRestore.id)}"]`
+        );
+        if (next) {
+          next.focus();
+          try { next.setSelectionRange(focusRestore.start, focusRestore.end); }
+          catch (_) {}
+        }
+      }
     }
 
     function wireItemActions() {
