@@ -404,13 +404,15 @@ function getEffectiveTheme(settings) {
   return settings.theme;
 }
 
+// package.json's "version" must stay 3-segment semver for electron-builder.
+// DISPLAY_VERSION is the fuller form shown in the UI (home footer, Settings >
+// About) and is bumped by hand — it is intentionally not derived from
+// app.getVersion().
+const DISPLAY_VERSION = '2.1.4.7.0';
+
 function getVersions() {
-  // package.json's "version" stays a plain 4-segment string electron-builder
-  // can read as a Windows FILEVERSION (app.getVersion() reflects it as-is);
-  // the trailing ".0" here is purely the fuller display form shown in the UI
-  // (home footer, Settings > About) — single source so both stay in sync.
   return {
-    app:      app.getVersion() + '.0',
+    app:      DISPLAY_VERSION,
     electron: process.versions.electron,
     chromium: process.versions.chrome,
     node:     process.versions.node
